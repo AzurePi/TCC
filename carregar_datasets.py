@@ -2,63 +2,40 @@ import shutil
 from pathlib import Path
 
 import kaggle
-import torch
 from datasets import load_dataset, DatasetDict
-from torchvision.transforms import v2 as transforms
+from transformers import BaseImageProcessor
 
 
-def carregar_datasets(i: int, validation_split: float, batch_size: int, image_size: tuple[int, int]) -> tuple[
-    torch.utils.data.DataLoader, torch.utils.data.DataLoader, torch.utils.data.DataLoader, list[str]]:
+def carregar_datasets(i: int, validation_split: float, processor: BaseImageProcessor) -> \
+        tuple[
+            DatasetDict, list[str]]:
     """
-    Carrega e prepara datasets de treinamento, validação e teste utilizando a biblioteca datasets.
-
-    :param i: Número do dataset.
-    :param validation_split: Proporção dos dados de treinamento a serem utilizados para validação.
-    :param batch_size: Tamanho da batch para o carregamento dos dados.
-    :return: Tupla contendo os data loaders para treinamento, validação, teste e uma lista dos nomes das classes.
+    Carrega e prepara datasets de treinamento, validação e teste para HuggingFace Trainer.
     """
-
-    # Cria o objeto DatasetDict a partir dos diretórios de treinamento e teste
+    # Carrega conjuntos de imagens
     raw_datasets = DatasetDict({
-        "train": load_dataset(f"./treinamento{i}", split="train"),
-        "test": load_dataset(f"./teste{i}", split="train")  # 'split="train"' para carregar o diretório inteiro
+        'train': load_dataset("imagefolder", data_dir=f"./treinamento{i}")["train"],
+        'test': load_dataset("imagefolder", data_dir=f"./teste{i}")["train"]
     })
 
-    # Divide o conjunto de treinamento para obter um conjunto de validação
-    train_test_split = raw_datasets["train"].train_test_split(test_size=validation_split, seed=42)
-    raw_datasets["train"] = train_test_split["train"]
-    raw_datasets["validation"] = train_test_split["test"]
+    # Split em validação
+    split = raw_datasets["train"].train_test_split(test_size=validation_split, seed=42)
+    raw_datasets["train"] = split["train"]
+    raw_datasets["validation"] = split["test"]
 
     class_names = raw_datasets["train"].features["label"].names
 
-    # Define as transformações para as imagens
-    transform = transforms.Compose([
-        transforms.ToImage(),
-        transforms.Resize(image_size),
-        transforms.ToDtype(torch.float32, scale=True),
-        transforms.Normalize(mean=[0.5], std=[0.5])
-    ])
+    def transform(examples):
+        if "image" in examples:
+            images = [img.convert("RGB") for img in examples["image"]]
+            inputs = processor(images)
+            inputs["labels"] = examples["label"]
+            return inputs
+        else:
+            raise ValueError(f"Coluna 'image' não está presente. Keys recebidas: {examples.keys()}")
 
-    # Aplica as transformações aos datasets
-    def apply_transforms(examples):
-        examples["pixel_values"] = [transform(image.convert("L")) for image in examples["image"]]
-        return examples
-
-    transformed_datasets = raw_datasets.map(apply_transforms, batched=True)
-
-    # Remove a coluna 'image' para otimizar o uso de memória e renomeia 'label' para 'labels'
-    transformed_datasets = transformed_datasets.remove_columns("image")
-    transformed_datasets = transformed_datasets.rename_column("label", "labels")
-
-    # Formata os datasets para uso com PyTorch
-    transformed_datasets.set_format(type="torch", columns=["pixel_values", "labels"])
-
-    # Cria os DataLoaders
-    train_dataloader = torch.utils.data.DataLoader(transformed_datasets["train"], batch_size=batch_size, shuffle=True)
-    validation_dataloader = torch.utils.data.DataLoader(transformed_datasets["validation"], batch_size=batch_size)
-    test_dataloader = torch.utils.data.DataLoader(transformed_datasets["test"], batch_size=batch_size)
-
-    return train_dataloader, validation_dataloader, test_dataloader, class_names
+    datasets = raw_datasets.map(transform, batched=True, num_proc=8, remove_columns=["image", "label"])
+    return datasets, class_names
 
 
 def preparar_diretorios(test_split: float, dataset_dirs=None) -> list[list[int]]:
@@ -104,7 +81,7 @@ def formatar_diretorio(origem: Path, destino: Path) -> None:
     shutil.rmtree(origem)
 
 
-def preparar_dataset1(dataset_dir=Path("./dataset1")) -> None:
+def preparar_dataset1(dataset_dir: Path = Path("./dataset1")) -> None:
     """
     Prepara o ambiente com o dataset "`sarscov2-ctscan-dataset`", baixado do kaggle.
 
@@ -130,7 +107,7 @@ def preparar_dataset1(dataset_dir=Path("./dataset1")) -> None:
         print("Diretório de imagens para o dataset 1 já está presente na máquina. Prosseguindo...\n")
 
 
-def preparar_dataset2(dataset_dir=Path("./dataset2")) -> None:
+def preparar_dataset2(dataset_dir: Path = Path("./dataset2")) -> None:
     """
     Prepara o ambiente com o dataset "`preprocessed-ct-scans-for-covid19`", baixado do kaggle.
 
@@ -221,7 +198,7 @@ def treinamento_e_teste(i: int, num_positivas: int, num_negativas: int, test_spl
 
 
 def apagar_treinamento_e_teste():
-    pai = Path("src/")
+    pai = Path(".")
     deletar = []
 
     for diretorio in pai.glob("*"):
@@ -230,3 +207,7 @@ def apagar_treinamento_e_teste():
 
     for diretorio in deletar:
         shutil.rmtree(diretorio)
+
+
+if __name__ == "__main__":
+    preparar_diretorios(test_split=0.1)
