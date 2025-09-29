@@ -1,30 +1,37 @@
+import os
 import shutil
 from pathlib import Path
 
 import kaggle
+import numpy as np
 from datasets import load_dataset, DatasetDict
+from matplotlib import pyplot as plt
 from transformers import BaseImageProcessor
 
 
-def carregar_datasets(i: int, validation_split: float, processor: BaseImageProcessor) -> \
-        tuple[
-            DatasetDict, list[str]]:
+def carregar_datasets(
+        dataset_num: int,
+        validation_split: float,
+        processor: BaseImageProcessor
+) -> tuple[DatasetDict, list[str]]:
     """
     Carrega e prepara datasets de treinamento, validação e teste para HuggingFace Trainer.
     """
     # Carrega conjuntos de imagens
     raw_datasets = DatasetDict({
-        'train': load_dataset("imagefolder", data_dir=f"./treinamento{i}")["train"],
-        'test': load_dataset("imagefolder", data_dir=f"./teste{i}")["train"]
+        'train': load_dataset("imagefolder", data_dir=f"./treinamento{dataset_num}")["train"],
+        'test': load_dataset("imagefolder", data_dir=f"./teste{dataset_num}")["train"]
     })
 
-    # Split em validação
+    # Split em treino, teste e validação
     split = raw_datasets["train"].train_test_split(test_size=validation_split, seed=42)
     raw_datasets["train"] = split["train"]
     raw_datasets["validation"] = split["test"]
 
+    salvar_amostras(raw_datasets, dataset_num)
     class_names = raw_datasets["train"].features["label"].names
 
+    # Pré-processamento
     def transform(examples):
         if "image" in examples:
             images = [img.convert("RGB") for img in examples["image"]]
@@ -35,6 +42,8 @@ def carregar_datasets(i: int, validation_split: float, processor: BaseImageProce
             raise ValueError(f"Coluna 'image' não está presente. Keys recebidas: {examples.keys()}")
 
     datasets = raw_datasets.map(transform, batched=True, num_proc=8, remove_columns=["image", "label"])
+    datasets.set_format(type="torch", columns=["pixel_values", "labels"])
+    salvar_amostras(datasets, dataset_num, class_names)
     return datasets, class_names
 
 
@@ -107,7 +116,7 @@ def preparar_dataset1(dataset_dir: Path = Path("./dataset1")) -> None:
         print("Diretório de imagens para o dataset 1 já está presente na máquina. Prosseguindo...\n")
 
 
-def preparar_dataset2(dataset_dir: Path = Path("./dataset2")) -> None:
+def preparar_dataset2(dataset_dir: Path = Path("./dataset2"), include_ni=False) -> None:
     """
     Prepara o ambiente com o dataset "`preprocessed-ct-scans-for-covid19`", baixado do kaggle.
 
@@ -126,11 +135,13 @@ def preparar_dataset2(dataset_dir: Path = Path("./dataset2")) -> None:
 
         positivo_dir = dataset_dir / "Original CT Scans/pCT"
         negativo_dir = dataset_dir / "Original CT Scans/nCT"
-        non_informative_dir = dataset_dir / "Original CT Scans/NiCT"
 
         formatar_diretorio(positivo_dir, dataset_dir / "positivo")
         formatar_diretorio(negativo_dir, dataset_dir / "negativo")
-        formatar_diretorio(non_informative_dir, dataset_dir / "negativo")
+
+        if include_ni:
+            non_informative_dir = dataset_dir / "Original CT Scans/NiCT"
+            formatar_diretorio(non_informative_dir, dataset_dir / "negativo")
 
         shutil.rmtree(dataset_dir / "Original CT Scans")
         print("Pronto!\n")
@@ -207,6 +218,69 @@ def apagar_treinamento_e_teste():
 
     for diretorio in deletar:
         shutil.rmtree(diretorio)
+
+
+def salvar_amostras(dataset_dict, dataset_num, class_names=None, n=9, out_dir="./"):
+    """
+    Salva grids 3x3 de imagens amostradas de cada split (train, validation, test).
+    Inferimos automaticamente se o dataset é bruto (image/label) ou processado (pixel_values/labels).
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    for split in dataset_dict.keys():
+        ds = dataset_dict[split]
+
+        # Decide tipo com base nas colunas
+        colunas = ds.column_names
+        if "image" in colunas:
+            tipo = "raw"
+        elif "pixel_values" in colunas:
+            tipo = "processado"
+        else:
+            raise ValueError(f"Split {split} do dataset {dataset_num} não contém colunas esperadas. Keys: {colunas}; Esperado: \"image\" ou \"pixel_values\"")
+        print(f"Salvando amostras do Dataset {dataset_num} ({split}) {'pré-processado' if tipo == 'processado' else ''}...")
+
+        # Seleciona índices aleatórios
+        indices = np.random.choice(len(ds), size=min(n, len(ds)), replace=False)
+
+        imagens, labels = [], []
+        for i in indices:
+            exemplo = ds[i]
+
+            if tipo == "raw":
+                img = exemplo["image"]
+                label = exemplo["label"]
+                if hasattr(ds.features["label"], "int2str"):
+                    label = ds.features["label"].int2str(label)
+                else:
+                    label = str(label)
+
+            elif tipo == "processado":
+                arr = exemplo["pixel_values"].numpy() if hasattr(exemplo["pixel_values"], "numpy") else exemplo[
+                    "pixel_values"]
+                arr = ((arr.transpose(1, 2, 0) + 1.0) * 127.5).clip(0, 255).astype("uint8")
+                img = arr
+                label = class_names[exemplo["labels"]] if class_names else str(exemplo["labels"])
+
+            imagens.append(img)
+            labels.append(label)
+
+        # Plotar
+        fig, axes = plt.subplots(3, 3, figsize=(8, 8))
+        fig.suptitle(f"Amostras{' pŕe-processadas' if tipo == 'processado' else ''} do dataset {dataset_num} ({split})",
+                     fontsize=14)
+        for ax, img, label in zip(axes.flatten(), imagens, labels):
+            ax.imshow(img)
+            ax.set_title(label, fontsize=8)
+            ax.axis("off")
+        for ax in axes.flatten()[len(imagens):]:
+            ax.axis("off")
+        plt.tight_layout()
+
+        # Nome do arquivo reflete automaticamente o tipo
+        out_path = os.path.join(out_dir, f"amostras-{tipo}_{dataset_num}_{split}.png")
+        plt.savefig(out_path, dpi=150)
+        plt.close(fig)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,8 @@
 from carregar_datasets import carregar_datasets
 from models import get_model_and_processor, get_trainer
+from transformers.utils import logging
+
+logging.set_verbosity_error()
 
 model_specs = [
     {
@@ -44,7 +47,7 @@ if __name__ == '__main__':
 
             print(dataset)
 
-            trainer = get_trainer(model, dataset, spec, dataset_num)
+            trainer = get_trainer(model, dataset, spec, dataset_num, processor)
 
             trainer.train()
 

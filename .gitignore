@@ -1,6 +1,8 @@
 .idea
+/venv/
 /dataset*/
 /results/
 /teste*/
 /treinamento*/
 .env
+*.png

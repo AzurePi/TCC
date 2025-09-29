@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 from transformers import AutoModelForImageClassification, AutoImageProcessor, TrainingArguments, Trainer, \
-    TrainerCallback, TrainerState, TrainerControl, AutoConfig
+    TrainerCallback, TrainerState, TrainerControl, AutoConfig, default_data_collator
 
 
 def compute_metrics(eval_pred):
@@ -17,7 +17,9 @@ def compute_metrics(eval_pred):
     Retorna um dict que será logado automaticamente (inclusive no CSVLoggerCallback).
     """
     logits, labels = eval_pred
-    preds = np.argmax(logits, axis=-1)
+    if labels.ndim > 1:
+        labels = labels.argmax(axis=-1)
+    preds = logits.argmax(axis=-1)
 
     acc = accuracy_score(labels, preds)
     precision, recall, f1, _ = precision_recall_fscore_support(
@@ -130,13 +132,11 @@ class CSVLoggerCallback(TrainerCallback):
         )
 
 
-def get_model_and_processor(spec):
-    model_id = spec["model"]
-    is_finetuning = spec.get("finetuning", True)  # Assume finetuning se não especificado
-
+def get_model_and_processor(spec:dict):
+    model_id = str(spec.get("model"))
     processor = AutoImageProcessor.from_pretrained(model_id)
 
-    if is_finetuning:
+    if spec.get("finetuning", True):
         # Carrega o modelo com pesos pré-treinados
         model = AutoModelForImageClassification.from_pretrained(
             pretrained_model_name_or_path=model_id,
@@ -148,8 +148,7 @@ def get_model_and_processor(spec):
         # Carrega apenas a configuração do modelo e o inicializa com pesos aleatórios
         config = AutoConfig.from_pretrained(
             pretrained_model_name_or_path=model_id,
-            num_labels=2,
-            ignore_mismatched_sizes=True
+            num_labels=2
         )
         model = AutoModelForImageClassification.from_config(config)
         print("Modelo inicializado com pesos aleatórios (treinamento do zero).")
@@ -157,21 +156,36 @@ def get_model_and_processor(spec):
     return model, processor
 
 
-def get_trainer(model, dataset, spec, dataset_num):
-    output_dir = Path(f"./results/{spec['name']}/dataset{dataset_num}")
+class SilentTrainer(Trainer):
+    def log(self, logs):
+        # não imprime nada
+        if self.is_world_process_zero():
+            self.state.log_history.append(logs)
+        # mantém callbacks funcionando
+        self.control = self.callback_handler.on_log(
+            self.args, self.state, self.control, logs
+        )
+
+
+
+def get_trainer(model, dataset, spec: dict, dataset_num, processor):
+    output_dir = Path(f"./results/{spec.get('name')}/dataset{dataset_num}")
 
     args = TrainingArguments(
-        output_dir=output_dir.__str__(),
-        eval_strategy="steps",
-        save_strategy="no",
+        output_dir=str(output_dir),
+        eval_strategy="epoch",
+        logging_strategy="steps",
+        logging_steps=50,
+        save_strategy="epoch",
         per_device_train_batch_size=16,
         per_device_eval_batch_size=16,
-        num_train_epochs=5,
-        logging_dir="./logs",
-        learning_rate=5e-5,
+        num_train_epochs=5 if not spec.get("finetuning", True) else 1,
+        learning_rate=1e-3 if not spec.get("finetuning", True) else 5e-5,
+        fp16=True,
+        metric_for_best_model="f1",
+        dataloader_num_workers=4,
         overwrite_output_dir=True,
         seed=1234,
-
     )
 
     return Trainer(
@@ -179,6 +193,8 @@ def get_trainer(model, dataset, spec, dataset_num):
         args=args,
         train_dataset=dataset["train"],
         eval_dataset=dataset["validation"],
+        tokenizer=processor,
+        data_collator=default_data_collator,
         callbacks=[
             CSVLoggerCallback(output_dir=output_dir / "metrics", model_name=spec["name"]),
         ],
