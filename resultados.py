@@ -5,27 +5,35 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 from matplotlib.ticker import MaxNLocator, MultipleLocator
 
 
 def useless_metric(metric: str):
-    if metric == "total_flos":
-        return True
-    if metric == "train_loss":
-        return True
-    if metric.startswith('epoch'):
-        return True
-    if metric == 'grad_norm':
-        return True
-    if metric.endswith('runtime'):
-        return True
-    if metric.endswith('per_second'):
+    useless = [
+        "total_flos",
+        "train_loss",
+        "learning_rate",
+        "grad_norm",
+        "model_preparation_time"
+    ]
+
+    useless_begginings = (
+        'epoch'
+    )
+
+    useless_endings = (
+        'runtime',
+        'per_second'
+    )
+
+    if metric in useless or metric.startswith(useless_begginings) or metric.endswith(useless_endings):
         return True
     return False
 
 
-def carregar_logs_csv(train_log_path: str, eval_log_path: str):
-    """Carrega métricas de treino e validação a partir dos CSVs do callback."""
+def carregar_logs_csv(train_log_path: Path, eval_log_path: Path):
+    """Carrega métricas de treino, validação e baseline a partir dos CSVs do callback."""
     treino = {}
     validacao = {}
 
@@ -59,10 +67,16 @@ def carregar_logs_csv(train_log_path: str, eval_log_path: str):
     return treino_alinhado, validacao_alinhado
 
 
-def grafico_aux(titulo: str, treino: list[float] | None, validacao: list[float] | None,
-                ylabel: str, output_path: Path) -> None:
+def grafico_aux(
+        titulo: str,
+        treino: list[float] | None,
+        validacao: list[float] | None,
+        ylabel: str,
+        output_path: Path
+) -> None:
     """Plota uma curva, podendo ser treino, validação, ou ambos."""
-    plt.title(titulo)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    fig.suptitle(titulo)
 
     max_len = 0
     max_val = 0.0
@@ -99,44 +113,46 @@ def grafico_aux(titulo: str, treino: list[float] | None, validacao: list[float] 
     plt.close()
 
 
-def plotar_graficos_from_logs(output_dir: str, model_name: str):
+def plotar_graficos_from_logs(exec_dir: str, model_name: str):
     """
     Lê os logs CSV do callback e gera gráficos de perda e acurácia.
 
-    :param output_dir: diretório onde estão 'train_metrics.csv' e 'eval_metrics.csv'
+    :param exec_dir: diretório onde estão 'train_metrics.csv' e 'eval_metrics.csv'
     :param model_name: usado para nomear os arquivos de saída
     """
-    train_log = os.path.join(output_dir, "metrics/train_metrics.csv")
-    eval_log = os.path.join(output_dir, "metrics/eval_metrics.csv")
+    exec_dir = Path(exec_dir)
 
-    treino, validacao = carregar_logs_csv(train_log, eval_log)
+    train_log = exec_dir / "train_metrics.csv"
+    eval_log = exec_dir / "eval_metrics.csv"
 
-    graphs_dir = Path(output_dir) / "graphs"
-    graphs_dir.mkdir(exist_ok=True)
+    if not train_log.exists():
+        print(f"[IGNORADO] Treino não encontrado em {train_log}")
+        return
 
-    # Identifica todas as métricas únicas
-    todas_metricas = set(treino.keys()) | set(validacao.keys())
+    df_train = pd.read_csv(train_log, names=["step", "metric", "value"], header=0)
+    df_eval = pd.read_csv(eval_log, names=["step", "metric", "value"], header=0) if eval_log.exists() else None
 
-    for metric in sorted(list(todas_metricas)):
-        train_data = treino.get(metric, None)
-        # Procura a métrica de validação pelo nome com ou sem o prefixo
-        eval_data = validacao.get(metric, None) or validacao.get("eval_" + metric, None)
+    # Gráfico de Loss de treino
+    df_loss = df_train[df_train["metric"] == "loss"]
+    plt.figure()
+    plt.plot(df_loss["step"], df_loss["value"])
+    plt.xlabel("Step")
+    plt.ylabel("Train Loss")
+    plt.title(f"{model_name} - Train Loss")
+    plt.tight_layout()
+    plt.show()
 
-        if train_data or eval_data:
-            titulo = f"{metric.replace('_', ' ').capitalize()} ({model_name})"
-            ylabel = metric.replace('_', ' ').capitalize()
-
-            # Evita o prefixo "eval_" na label do eixo Y
-            if ylabel.lower().startswith("eval"):
-                ylabel = ylabel.removeprefix("eval ").strip()
-
-            grafico_aux(
-                titulo=titulo,
-                treino=train_data,
-                validacao=eval_data,
-                ylabel=ylabel,
-                output_path=graphs_dir / f"{model_name}_{metric}.svg"
-            )
+    # Gráfico de acurácia de validação, se existir
+    if df_eval is not None:
+        df_acc = df_eval[df_eval["metric"] == "eval_accuracy"]
+        if not df_acc.empty:
+            plt.figure()
+            plt.plot(df_acc["step"], df_acc["value"])
+            plt.xlabel("Step")
+            plt.ylabel("Eval Accuracy")
+            plt.title(f"{model_name} - Eval Accuracy")
+            plt.tight_layout()
+            plt.show()
 
 
 def carregar_resultados_json(filename="metrics.json"):
@@ -173,170 +189,179 @@ def extrair_metrica_final(log_path: str, metric_name: str) -> float | None:
     return metric_value
 
 
-def _plotar_barras_agrupadas(
-        modelos: list[str],
-        dados: dict[str, list[float]],  # {'metrica1': [v1, v2, ...], 'metrica2': [v1, v2, ...]}
+def plotar_barras_agrupadas(
+        dados: dict,
         titulo: str,
         ylabel: str,
-        output_filename: str,
-        base_results_dir: str,
-        limite_y: float | None = None
-) -> None:
-    """Função genérica para plotar barras agrupadas."""
+        output_path: Path,
+        ylim: tuple[float, float] | None = None,
+        formato_label: str = "{:.2f}"
+):
+    """
+    Plota gráfico de barras agrupadas (Scratch vs Baseline vs FT).
+    """
+    chaves_ordenadas = sorted(dados.keys(), key=lambda x: (x[0], x[1]))
 
-    METRICAS = list(dados.keys())
-    num_modelos = len(modelos)
-    num_metricas = len(METRICAS)
+    labels = [f"{modelo}-D{ds}" for ds, modelo in chaves_ordenadas]
+    grupos = sorted({g for v in dados.values() for g in v.keys()})  # ex: ["Baseline", "Scratch", "FT"]
 
-    x = np.arange(num_modelos)
-    width = 0.8 / max(1, num_metricas)
+    x = np.arange(len(labels))
+    width = 0.8 / len(grupos)  # largura dinâmica
 
-    # Cores personalizadas
-    cores = ['cornflowerblue', 'darkorange', '#4daf4a', '#e41a1c', '#984ea3', '#ff7f00']
+    fig, ax = plt.subplots(figsize=(max(10, len(labels) * 1.8), 7))
 
-    fig, ax = plt.subplots(figsize=(max(10, num_modelos * 1.5), 7))
-    retangulos = []
+    rects = []
+    for i, grupo in enumerate(grupos):
+        valores = [dados[chave].get(grupo, 0.0) for chave in chaves_ordenadas]
+        rects.append(
+            ax.bar(x + (i - (len(grupos) - 1) / 2) * width, valores, width, label=grupo)
+        )
 
-    # Plota as métricas, deslocando o centro de cada barra
-    for i, metrica in enumerate(METRICAS):
-        valores = dados[metrica]
-        # Calcula a posição central para o grupo de barras
-        offset = x + (i - (num_metricas - 1) / 2) * width
-
-        rects = ax.bar(offset, valores, width,
-                       label=metrica.replace('_', ' ').title(),
-                       color=cores[i % len(cores)])
-        retangulos.append(rects)
-
-    # --- Configurações Comuns do Gráfico ---
     ax.set_title(titulo, fontsize=14)
     ax.set_ylabel(ylabel, fontsize=12)
     ax.set_xticks(x)
-    ax.set_xticklabels(modelos, rotation=45, ha="right", fontsize=10)
-    ax.legend(shadow=True, loc='best', fontsize=10)
-    ax.grid(axis='y', linestyle='--', linewidth=0.5)
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=10)
+    if ylim:
+        ax.set_ylim(*ylim)
+    ax.legend(shadow=True, loc="best", fontsize=10)
+    ax.grid(axis="y", linestyle="--", linewidth=0.5)
 
-    if limite_y is not None:
-        ax.set_ylim(0, limite_y)
-
-    # Função auxiliar para colocar rótulos nas barras
-    def autolabel(rects_list):
-        formato = '.3f' if limite_y == 1.05 else '.2f'
-        for rects in rects_list:
-            for rect in rects:
+    def autolabel(rects):
+        for rect_group in rects:
+            for rect in rect_group:
                 height = float(rect.get_height())
                 if height > 0.01:
-                    ax.annotate(f"{height.__format__(formato) + ('s' if 'runtime' in output_filename else '')}",
+                    ax.annotate(formato_label.format(height),
                                 xy=(rect.get_x() + rect.get_width() / 2, height),
                                 xytext=(0, 3),
                                 textcoords="offset points",
-                                ha='center', va='bottom',
-                                fontsize=6)
+                                ha="center", va="bottom", fontsize=6)
 
-    autolabel(retangulos)
+    autolabel(rects)
 
     fig.tight_layout()
-
-    # Define o caminho de saída e salva
-    output_dir = Path(base_results_dir) / "comparisons"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / output_filename
-
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
-    print(f"\nGráfico de {titulo.lower()} salvo em: {output_path}")
+    print(f"Gráfico salvo em: {output_path}")
 
 
-def comparar_runtimes_modelos(
-        specs_datasets: list[tuple[dict, int]],
-        base_results_dir: str | Path
-):
-    METRICAS_RUNTIME = {"Train Runtime (s)": ("train_metrics.csv", "train_runtime"),
-                        "Evaluation Runtime (s)": ("eval_metrics.csv", "evaluation_runtime")}
+def comparar_runtimes_modelos(resultados_dir: str, modelos: list, dataset_num: int):
+    dados = []
 
-    modelos = []
-    dados_plot = {nome_plot: [] for nome_plot in METRICAS_RUNTIME}
+    for model_name in modelos:
+        base_dir = Path(resultados_dir) / model_name / f"dataset{dataset_num}"
+        exec_dirs = base_dir.glob("lr_*_epochs_*")
 
-    for spec, dataset_num in specs_datasets:
-        model_name = spec['name']
-        model_label = f"{model_name}-D{dataset_num}"
-        modelos.append(model_label)
+        for d in exec_dirs:
+            metrics_path = d / "eval_metrics.csv"
+            if not metrics_path.exists():
+                continue
 
-        log_dir = Path(base_results_dir) / model_name / f"dataset{dataset_num}" / "metrics"
+            df = pd.read_csv(metrics_path, names=["step", "metric", "value"], header=0)
+            tempo = df[df["metric"] == "tempo_total_segundos"]
 
-        for nome_plot, (csv_file, metric_name) in METRICAS_RUNTIME.items():
-            log_path = log_dir / csv_file
-            valor = extrair_metrica_final(log_path, metric_name)
-            dados_plot[nome_plot].append(valor if valor is not None else 0.0)
+            if len(tempo) == 0:
+                continue
 
-    _plotar_barras_agrupadas(
-        modelos=modelos,
-        dados=dados_plot,
-        titulo='Comparação de Runtimes de Treinamento e Avaliação',
-        ylabel='Tempo (segundos)',
-        output_filename="runtimes_comparison.svg",
-        base_results_dir=base_results_dir,
-        limite_y=None
-    )
+            tempo_final = float(tempo["value"].iloc[-1])
+            dados.append((model_name, d.name, tempo_final))
 
-
-def comparar_metricas_finais(
-        specs_datasets: list[tuple[dict, int]],
-        base_results_dir: str | Path
-):
-    METRICAS_FICAIS = ["accuracy", "f1", "precision", "recall"]
-
-    modelos = []
-    dados_plot = {m.capitalize(): [] for m in METRICAS_FICAIS}
-
-    for spec, dataset_num in specs_datasets:
-        model_name = spec['name']
-        model_label = f"{model_name}-D{dataset_num}"
-        modelos.append(model_label)
-
-        log_dir = Path(base_results_dir) / model_name / f"dataset{dataset_num}" / "metrics"
-        eval_log = log_dir / "eval_metrics.csv"
-
-        for metrica in METRICAS_FICAIS:
-            valor = extrair_metrica_final(eval_log, f"eval_{metrica}")
-            dados_plot[metrica.capitalize()].append(valor if valor is not None else 0.0)
-
-    if not modelos:
-        print("Aviso: Nenhuma métrica de avaliação encontrada para plotagem.")
+    if not dados:
+        print("Nenhum runtime registrado.")
         return
 
-    _plotar_barras_agrupadas(
-        modelos=modelos,
-        dados=dados_plot,
-        titulo='Comparação de Métricas Finais de Avaliação',
-        ylabel='Valor da Métrica (0.0 a 1.0)',
-        output_filename="final_metrics_comparison.svg",
-        base_results_dir=base_results_dir,
-        limite_y=1.05  # Força o limite Y de 0 a 1
-    )
+    df_time = pd.DataFrame(dados, columns=["modelo", "execucao", "tempo_segundos"])
+    print(df_time)
+
+    plt.figure()
+    df_time.groupby("modelo")["tempo_segundos"].mean().plot(kind="bar")
+    plt.ylabel("Tempo médio (s)")
+    plt.title("Comparação de Tempo Médio de Treino")
+    plt.tight_layout()
+    plt.show()
+
+
+def comparar_metricas_finais(resultados_dir: str, model_name: str, dataset_num: int):
+    base_dir = Path(resultados_dir) / model_name / f"dataset{dataset_num}"
+    exec_dirs = sorted(base_dir.glob("lr_*_epochs_*"))
+
+    resultados = []
+
+    for d in exec_dirs:
+        eval_log = d / "eval_metrics.csv"
+        if not eval_log.exists():
+            continue
+
+        df = pd.read_csv(eval_log, names=["step", "metric", "value"], header=0)
+        df_acc = df[df["metric"] == "eval_accuracy"]
+        if df_acc.empty:
+            continue
+
+        final_acc = df_acc.iloc[-1]["value"]
+
+        # extrai hiperparâmetros do nome da pasta
+        _, lr_val, _, epochs_val = d.name.split("_")
+        resultados.append((float(lr_val), int(epochs_val), final_acc))
+
+    if not resultados:
+        print("Nenhuma execução encontrada.")
+        return
+
+    resultados = pd.DataFrame(resultados, columns=["lr", "epochs", "accuracy"])
+    print(resultados)
+
+    plt.figure()
+    for ep in sorted(resultados["epochs"].unique()):
+        df_ep = resultados[resultados["epochs"] == ep]
+        plt.plot(df_ep["lr"], df_ep["accuracy"], marker="o", label=f"{ep} epochs")
+
+    plt.xlabel("Learning Rate")
+    plt.ylabel("Final Eval Accuracy")
+    plt.title(f"{model_name} - Comparação por LR e Épocas")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
 
 
 if __name__ == "__main__":
-    from treinamento import model_specs, dataset_nums
+    from treinamento import model_specs, dataset_nums, num_epochs, learning_rates
 
-    base_results_dir = Path("./results")
-    todas_combinacoes = []
+    for n_epochs in num_epochs:
+        for lr in learning_rates:
 
-    for spec in model_specs:
-        for dataset_num in dataset_nums:
-            todas_combinacoes.append((spec, dataset_num))
+            # Para cada dataset, agrupamos resultados para comparação
+            for dataset_num in dataset_nums:
 
-            plotar_graficos_from_logs(
-                output_dir=base_results_dir / spec['name'] / f"dataset{dataset_num}",
-                model_name=spec["name"]
-            )
+                # Lista de nomes de modelos para comparação
+                nomes_modelos = [spec["name"] for spec in model_specs]
 
-    comparar_runtimes_modelos(
-        specs_datasets=todas_combinacoes,
-        base_results_dir=base_results_dir
-    )
+                print(f"\n=== Resultados: dataset{dataset_num} | lr={lr} | epochs={n_epochs} ===")
 
-    comparar_metricas_finais(
-        specs_datasets=todas_combinacoes,
-        base_results_dir=base_results_dir
-    )
+                # 1) Plot para cada modelo individual
+                for spec in model_specs:
+                    exec_dir = (
+                            Path("./results")
+                            / spec["name"]
+                            / f"dataset{dataset_num}"
+                            / f"lr_{lr}_epochs_{n_epochs}"
+                    )
+
+                    plotar_graficos_from_logs(
+                        exec_dir=str(exec_dir),
+                        model_name=f"{spec['name']} (dataset{dataset_num}, lr={lr}, e={n_epochs})"
+                    )
+
+                # 2) Comparar métricas finais entre modelos
+                comparar_metricas_finais(
+                    resultados_dir="./results",
+                    model_name=None,  # este parâmetro não é usado na nova versão
+                    dataset_num=dataset_num
+                )
+
+                # 3) Comparar tempo de treinamento entre modelos
+                comparar_runtimes_modelos(
+                    resultados_dir="./results",
+                    modelos=nomes_modelos,
+                    dataset_num=dataset_num
+                )

@@ -4,11 +4,15 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
+from colorama import Fore, Style
 
-import numpy as np
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
-from transformers import AutoModelForImageClassification, AutoImageProcessor, TrainingArguments, Trainer, \
-    TrainerCallback, TrainerState, TrainerControl, AutoConfig, default_data_collator
+from torch import nn
+from transformers import (
+    AutoModelForImageClassification, AutoImageProcessor, TrainingArguments, Trainer,
+    TrainerCallback, TrainerState, TrainerControl, AutoConfig, default_data_collator, PreTrainedModel,
+    BaseImageProcessor, PrinterCallback, ProgressCallback
+)
 
 
 def compute_metrics(eval_pred):
@@ -57,34 +61,44 @@ def save_output_metrics(model_name, metrics, hparams=None):
 
 class CSVLoggerCallback(TrainerCallback):
     def __init__(self, output_dir, model_name, **hparams):
-        self.model_name = model_name
         self.output_dir = output_dir
+        self.model_name = model_name
         self.hparams = hparams
-        self.start_time = None
-        self.last_eval_metrics = {}  # Armazena as últimas métricas de avaliação
 
-        # Os caminhos dos arquivos são definidos aqui, mas os arquivos são criados depois
+        self.start_time = None
+        self.last_eval_metrics = {}
+        self.is_baseline = False
+
         self.train_log_path = os.path.join(output_dir, "train_metrics.csv")
         self.eval_log_path = os.path.join(output_dir, "eval_metrics.csv")
+        self.baseline_log_path = os.path.join(output_dir, "baseline_metrics.csv")
         os.makedirs(output_dir, exist_ok=True)
+
+    def set_baseline_mode(self, mode: bool):
+        """Permite marcar que a próxima avaliação é baseline."""
+        self.is_baseline = mode
+
+    def _initialize_csv(self, path, headers):
+        """Função auxiliar para criar um CSV com cabeçalho, sobrescrevendo se existir."""
+        with open(path, mode='w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
 
     def on_train_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         """Chamado no início de cada execução de trainer.train()."""
-
-        def _initialize_csv(path, headers):
-            """Função auxiliar para criar um CSV com cabeçalho, sobrescrevendo se existir."""
-            with open(path, mode='w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(headers)
-
         self.start_time = time.time()
         # Inicializa/sobrescreve os arquivos de log para garantir um registro limpo
-        _initialize_csv(self.train_log_path, ["step", "metric", "value"])
-        _initialize_csv(self.eval_log_path, ["step", "metric", "value"])
-        print(f"Arquivos de log inicializados em '{self.output_dir}'. Logs antigos foram sobrescritos.")
+        if not os.path.exists(self.train_log_path):
+            self._initialize_csv(self.train_log_path, ["step", "metric", "value"])
+            print(
+                f"{Fore.BLUE}Arquivo de log inicializado em '{self.train_log_path}'. Logs antigos foram sobrescritos.{Fore.RESET}")
+        if not os.path.exists(self.eval_log_path):
+            self._initialize_csv(self.eval_log_path, ["step", "metric", "value"])
+            print(
+                f"{Fore.BLUE}Arquivo de log inicializado em '{self.eval_log_path}'. Logs antigos foram sobrescritos.{Fore.RESET}")
 
     def on_log(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, logs=None, **kwargs):
-        """Salva apenas métricas de treino (ex: loss, learning_rate)."""
+        """Salva apenas métricas de treino."""
         if logs is None or not state.is_world_process_zero:
             return
 
@@ -92,24 +106,34 @@ class CSVLoggerCallback(TrainerCallback):
         with open(self.train_log_path, mode='a', newline='') as f:
             writer = csv.writer(f)
             for k, v in logs.items():
-                if not k.startswith("eval_") and k != "epoch" and isinstance(v, (int, float)):
+                if not k.startswith("eval_") and not k.startswith("baseline_") and k != "epoch" and isinstance(v, (int,
+                                                                                                                   float)):
                     writer.writerow([step, k, v])
 
-    def on_evaluate(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, metrics=None,
-                    **kwargs):
-        """Salva apenas métricas de avaliação."""
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
         if metrics is None or not state.is_world_process_zero:
             return
 
-        # Armazena as métricas para uso no on_train_end
-        self.last_eval_metrics = metrics.copy()
+        if self.is_baseline:
+            self._initialize_csv(self.baseline_log_path, ["step", "metric", "value"])
+            target_path = self.baseline_log_path
+            prefix = "baseline_"
+        else:
+            self.last_eval_metrics = metrics.copy()
+            target_path = self.eval_log_path
+            prefix = "eval_"
 
         step = state.global_step
-        with open(self.eval_log_path, mode='a', newline='') as f:
+
+        with open(target_path, mode='a', newline='') as f:
             writer = csv.writer(f)
             for k, v in metrics.items():
-                if k.startswith("eval_") and isinstance(v, (int, float)):
+                if k.startswith(prefix) and isinstance(v, (int, float)):
                     writer.writerow([step, k, v])
+
+        if self.is_baseline:
+            print(f"{Fore.BLUE}Baseline salvo em {self.baseline_log_path}{Fore.RESET}")
+            self.set_baseline_mode(mode=False)  # reseta para não poluir avaliações seguintes
 
     def on_train_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         """Chamado no final do treino para salvar um resumo."""
@@ -122,7 +146,7 @@ class CSVLoggerCallback(TrainerCallback):
         final_metrics = self.last_eval_metrics
         final_metrics["tempo_total_segundos"] = round(end_time - self.start_time, 2)
 
-        # Remove a métrica de época
+        # Remove a métrica de época, se houver
         final_metrics.pop("epoch", None)
 
         save_output_metrics(
@@ -132,71 +156,130 @@ class CSVLoggerCallback(TrainerCallback):
         )
 
 
-def get_model_and_processor(spec:dict):
-    model_id = str(spec.get("model"))
+class ProgressOverrideCallback(ProgressCallback):
+    def on_prediction_step(self, args, state, control, eval_dataloader=None, **kwargs):
+        pass
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if state.is_local_process_zero and self.training_bar is not None:
+            _ = logs.pop("total_flos", None)
+
+
+from transformers import AutoConfig, AutoModelForImageClassification, AutoImageProcessor
+from colorama import Fore
+
+
+def get_model_and_processor(spec: dict):
+    model_id = str(spec["model"])
     processor = AutoImageProcessor.from_pretrained(model_id)
 
-    if spec.get("finetuning", True):
-        # Carrega o modelo com pesos pré-treinados
-        model = AutoModelForImageClassification.from_pretrained(
-            pretrained_model_name_or_path=model_id,
-            num_labels=2,
-            ignore_mismatched_sizes=True
-        )
-        print("Modelo carregado para fine-tuning.")
-    else:
-        # Carrega apenas a configuração do modelo e o inicializa com pesos aleatórios
-        config = AutoConfig.from_pretrained(
-            pretrained_model_name_or_path=model_id,
-            num_labels=2
-        )
+    transfer = spec.get("transfer", True)
+    finetuning = spec.get("finetuning", True)
+
+    if not transfer:
+        # Treinamento do zero
+        config = AutoConfig.from_pretrained(model_id, num_labels=2)
         model = AutoModelForImageClassification.from_config(config)
-        print("Modelo inicializado com pesos aleatórios (treinamento do zero).")
+        print(f"{Fore.LIGHTGREEN_EX}Modelo inicializado do zero.{Fore.RESET}")
+        return model, processor
+
+    # Se transfer=True, carregamos modelo pré-treinado
+    model = AutoModelForImageClassification.from_pretrained(
+        model_id,
+        num_labels=2,
+        ignore_mismatched_sizes=True
+    )
+
+    if finetuning:
+        # Fine-tuning total
+        print(f"{Fore.LIGHTGREEN_EX}Modelo carregado para fine-tuning completo.{Fore.RESET}")
+        return model, processor
+
+    # Caso transfer=True e finetuning=False → Transfer Learning (congelar backbone)
+    print(f"{Fore.LIGHTGREEN_EX}Modelo carregado para transfer learning (backbone congelado).{Fore.RESET}")
+
+    # Congela todos os parâmetros
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # Apenas a cabeça final fica treinável
+    # A cabeça usada pelos modelos da HF para classificação é sempre model.classifier
+    for param in model.classifier.parameters():
+        param.requires_grad = True
+
+    for name, p in model.named_parameters():
+        if p.requires_grad:
+            print(f"{Fore.LIGHTGREEN_EX}Treinável: {name}{Fore.RESET}")
 
     return model, processor
 
 
-class SilentTrainer(Trainer):
-    def log(self, logs):
-        # não imprime nada
-        if self.is_world_process_zero():
-            self.state.log_history.append(logs)
-        # mantém callbacks funcionando
-        self.control = self.callback_handler.on_log(
-            self.args, self.state, self.control, logs
-        )
-
-
-
-def get_trainer(model, dataset, spec: dict, dataset_num, processor):
-    output_dir = Path(f"./results/{spec.get('name')}/dataset{dataset_num}")
-
+def get_trainer_and_logger(
+        model,
+        dataset,
+        dataset_num,
+        spec: dict,
+        num_epochs: int,
+        learning_rate: float,
+        processor,
+        output_dir
+) -> (Trainer, CSVLoggerCallback):
     args = TrainingArguments(
         output_dir=str(output_dir),
-        eval_strategy="epoch",
+        save_strategy="epoch",  # salva ao final de cada epoch
+        save_total_limit=3,  # mantém últimos checkpoints
+        load_best_model_at_end=False,
+        overwrite_output_dir=False,  # não sobrescreve checkpoints anteriores
+        eval_strategy="steps",
+        eval_steps=50,
         logging_strategy="steps",
         logging_steps=50,
-        save_strategy="epoch",
         per_device_train_batch_size=16,
         per_device_eval_batch_size=16,
-        num_train_epochs=5 if not spec.get("finetuning", True) else 1,
-        learning_rate=1e-3 if not spec.get("finetuning", True) else 5e-5,
+        num_train_epochs=num_epochs,
+        learning_rate=learning_rate,
         fp16=True,
-        metric_for_best_model="f1",
         dataloader_num_workers=4,
-        overwrite_output_dir=True,
         seed=1234,
     )
 
-    return Trainer(
+    csv_logger = CSVLoggerCallback(output_dir=output_dir, model_name=spec["name"])
+
+    trainer = Trainer(
         model=model,
         args=args,
         train_dataset=dataset["train"],
         eval_dataset=dataset["validation"],
         tokenizer=processor,
         data_collator=default_data_collator,
-        callbacks=[
-            CSVLoggerCallback(output_dir=output_dir / "metrics", model_name=spec["name"]),
-        ],
+        callbacks=[csv_logger],
         compute_metrics=compute_metrics
     )
+
+    progress_callback = (next(filter(lambda x: isinstance(x, ProgressCallback), trainer.callback_handler.callbacks),
+                              None))
+    trainer.remove_callback(progress_callback)
+    trainer.add_callback(ProgressOverrideCallback)
+
+    trainer.remove_callback(PrinterCallback)
+
+    return trainer, csv_logger
+
+
+def get_latest_checkpoint(output_dir: Path):
+    checkpoints = sorted(output_dir.glob("checkpoint-*"), key=lambda p: int(p.name.split('-')[-1]))
+    return checkpoints[-1] if checkpoints else None
+
+
+class ModelWrapper(nn.Module):
+    """
+    Wrapper para pegar só o tensor dentre os outputs do modelo huggingface; para criar diagrama da arquitetura.
+    """
+
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x):
+        out = self.model(x)
+        return out['logits']  # só o tensor que interessa

@@ -6,3 +6,4 @@
 /treinamento*/
 .env
 *.png
+/runs/
