@@ -1,16 +1,16 @@
+import copy
 from pathlib import Path
-from transformers import AutoModelForImageClassification, AutoImageProcessor
+
+import torch
+from colorama import Fore
+from transformers import AutoModelForImageClassification
+
 from carregar_datasets import carregar_datasets
 from models import (
     get_model_and_processor,
     get_trainer_and_logger,
-    get_latest_checkpoint,
-    ModelWrapper
+    get_latest_checkpoint
 )
-from colorama import Fore
-from torch.utils.tensorboard import SummaryWriter
-import torch
-import copy
 
 dataset_nums = [1, 2, 3]
 num_epochs = [1, 3, 5]
@@ -62,18 +62,14 @@ model_specs = [
 ]
 
 if __name__ == "__main__":
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     for spec in model_specs:
         print(f"{Fore.CYAN}\n------- Treinando modelo {spec['name']} ({spec['type']}) -------{Fore.RESET}")
 
         # Carrega modelo base uma única vez
         base_model, processor = get_model_and_processor(spec)
-
-        # Registra o grafo apenas uma vez por modelo
-        wrapped_model = ModelWrapper(base_model)
-        writer = SummaryWriter(f"./runs/{spec['name'].replace(' ', '_').replace('-', '')}")
-        writer.add_graph(wrapped_model, torch.randn(1, 3, 224, 224))
-        writer.close()
-        del wrapped_model
+        base_model.to("cpu")
 
         for dataset_num in dataset_nums:
             dataset, class_names = carregar_datasets(
@@ -89,32 +85,41 @@ if __name__ == "__main__":
             print(f"{Fore.GREEN}{dataset}{Fore.RESET}")
 
             for learning_rate in learning_rates:
+                # variáveis para controle do checkpoint anterior e de epochs anteriores
+                prev_dir = None
+                prev_epochs = 0
+
                 for n_epochs in num_epochs:
                     print(f"\n--- Treinando por {n_epochs} epochs (lr={learning_rate}) ---")
 
                     output_dir = Path(f"./results/{spec['name']}/d{dataset_num}/lr_{learning_rate}_e_{n_epochs}")
                     output_dir.mkdir(parents=True, exist_ok=True)
-                    checkpoint = get_latest_checkpoint(output_dir)
 
-                    # Se existe checkpoint, retoma. Caso contrário, cria cópia do modelo base.
-                    if checkpoint:
-                        print(f"{Fore.YELLOW}Retomando checkpoint {checkpoint.name}{Fore.RESET}")
-                        model = AutoModelForImageClassification.from_pretrained(checkpoint)
+                    if prev_dir is not None:
+                        checkpoint = get_latest_checkpoint(prev_dir)
+
+                        if checkpoint:
+                            print(f"{Fore.YELLOW}Retomando checkpoint {checkpoint.name}{Fore.RESET}")
+                            model = AutoModelForImageClassification.from_pretrained(checkpoint)
+                            model.to(device)
+                        else:
+                            model = copy.deepcopy(base_model)
+                            model.to(device)
                     else:
                         model = copy.deepcopy(base_model)
+                        model.to(device)
 
                     model.config.label2id = label2id
                     model.config.id2label = id2label
 
                     trainer, csv_logger = get_trainer_and_logger(
-                        model, dataset, dataset_num, spec, n_epochs, learning_rate, processor, output_dir
+                        model, dataset, spec, n_epochs - prev_epochs, learning_rate, processor, output_dir
                     )
-
-                    # Avaliação de baseline apenas em cenários de inicialização completamente aleatória
-                    if not spec['transfer']:
-                        csv_logger.set_baseline_mode(True)
-                        trainer.evaluate(metric_key_prefix="baseline")
-                        csv_logger.set_baseline_mode(False)
 
                     trainer.train()
                     trainer.evaluate()
+
+                    prev_dir = output_dir
+                    prev_epochs = n_epochs
+
+                    torch.cuda.empty_cache()
