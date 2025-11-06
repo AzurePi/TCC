@@ -359,19 +359,19 @@ def salvar_tabela_latex(df, metric_name: str, output_dir: Path = "./"):
     col_header = " & ".join(tabela_fmt.columns)
 
     latex = (
-            f"\\begin{{tablex}}[htbp]\n"
+            f"\\begin{{table}}[htbp]\n"
             f"\\centering\n"
             f"\\caption{{Resultados da métrica {METRIC_TRANSLATION[metric_name]}}}\n"
             f"\\label{{tab:{METRIC_TRANSLATION[metric_name]}}}\n"
-            f"\\begin{{tabular}}{{X X {'X ' * len(tabela_fmt.columns)}}}\n"
+            f"\\begin{{tabularx}}{{X X {'X ' * len(tabela_fmt.columns)}}}\n"
             f"\\hline\n"
             f"Modelo & Técnica & {col_header} \\\\\n"
             f"\\hline\n" +
             "\n".join(linhas) +
             "\n\\hline\n"
-            "\\end{tabular}\n"
+            "\\end{tabularx}\n"
             "\\small Fonte: Elaboração própria\n"
-            "\\end{tablex}\n"
+            "\\end{table}\n"
     )
 
     file_path = f"{output_dir}/tabela_{metric_name}.tex"
