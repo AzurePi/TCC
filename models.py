@@ -4,14 +4,13 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
-from colorama import Fore, Style
 
+from colorama import Fore
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
-from torch import nn
+from transformers import AutoConfig, AutoModelForImageClassification, AutoImageProcessor
 from transformers import (
-    AutoModelForImageClassification, AutoImageProcessor, TrainingArguments, Trainer,
-    TrainerCallback, TrainerState, TrainerControl, AutoConfig, default_data_collator, PreTrainedModel,
-    BaseImageProcessor, PrinterCallback, ProgressCallback
+    TrainingArguments, Trainer,
+    TrainerCallback, TrainerState, TrainerControl, default_data_collator, PrinterCallback, ProgressCallback
 )
 
 
@@ -165,10 +164,6 @@ class ProgressOverrideCallback(ProgressCallback):
             _ = logs.pop("total_flos", None)
 
 
-from transformers import AutoConfig, AutoModelForImageClassification, AutoImageProcessor
-from colorama import Fore
-
-
 def get_model_and_processor(spec: dict):
     model_id = str(spec["model"])
     processor = AutoImageProcessor.from_pretrained(model_id)
@@ -217,7 +212,6 @@ def get_model_and_processor(spec: dict):
 def get_trainer_and_logger(
         model,
         dataset,
-        dataset_num,
         spec: dict,
         num_epochs: int,
         learning_rate: float,
@@ -250,7 +244,7 @@ def get_trainer_and_logger(
         args=args,
         train_dataset=dataset["train"],
         eval_dataset=dataset["validation"],
-        tokenizer=processor,
+        processing_class=processor,
         data_collator=default_data_collator,
         callbacks=[csv_logger],
         compute_metrics=compute_metrics
@@ -269,17 +263,3 @@ def get_trainer_and_logger(
 def get_latest_checkpoint(output_dir: Path):
     checkpoints = sorted(output_dir.glob("checkpoint-*"), key=lambda p: int(p.name.split('-')[-1]))
     return checkpoints[-1] if checkpoints else None
-
-
-class ModelWrapper(nn.Module):
-    """
-    Wrapper para pegar só o tensor dentre os outputs do modelo huggingface; para criar diagrama da arquitetura.
-    """
-
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-
-    def forward(self, x):
-        out = self.model(x)
-        return out['logits']  # só o tensor que interessa

@@ -379,7 +379,7 @@ def apagar_treinamento_e_teste():
         shutil.rmtree(diretorio)
 
 
-def salvar_amostras(dataset, dataset_num, class_names=None, n=9, out_dir="./"):
+def salvar_amostras(dataset, dataset_num, class_names=None, n=4, out_dir="./"):
     """
     Salva grids 3x3 de imagens amostradas de um dicionário.
     Inferimos automaticamente se o dataset é bruto (image/label) ou processado (pixel_values/labels).
@@ -420,11 +420,15 @@ def salvar_amostras(dataset, dataset_num, class_names=None, n=9, out_dir="./"):
             img = arr
             label = class_names[exemplo["labels"]] if class_names else str(exemplo["labels"])
 
-        imagens.append(img)
-        labels.append(label)
+        else:
+            img, label = None, None
+
+        if img and label:
+            imagens.append(img)
+            labels.append(label)
 
     # Plotar
-    fig, axes = plt.subplots(3, 3, figsize=(8, 8))
+    fig, axes = plt.subplots(2, 2, figsize=(8, 8))
     fig.suptitle(f"Amostras{' pŕe-processadas' if tipo == 'processado' else ''} do dataset {dataset_num}",
                  fontsize=14)
     for ax, img, label in zip(axes.flatten(), imagens, labels):

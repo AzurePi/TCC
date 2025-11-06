@@ -324,6 +324,126 @@ def comparar_metricas_finais(resultados_dir: str, model_name: str, dataset_num: 
     plt.show()
 
 
+def load_baseline(model_name, dataset_name, results_root):
+    f = Path(results_root) / model_name / dataset_name / "baseline_metrics.json"
+    if not f.exists():
+        return None
+    with open(f, "r") as fp:
+        data = json.load(fp)
+    return data.get("accuracy", None)
+
+
+def comparar_metricas_finais_por_dataset(resultados_dir: str, model_specs, dataset_num: int):
+    dados = {}  # {(tipo_modelo, dataset_num): {estrategia: accuracy}}
+
+    for spec in model_specs:
+        tipo = spec["type"]  # CNN ou ViT
+        grupo = classificar_treinamento(spec["transfer"], spec["finetuning"])
+        base_dir = Path(resultados_dir) / spec["name"] / f"dataset{dataset_num}"
+        exec_dirs = sorted(base_dir.glob("lr_*_epochs_*"))
+
+        melhor_acc = None
+        for d in exec_dirs:
+            eval_log = d / "eval_metrics.csv"
+            if not eval_log.exists():
+                continue
+
+            df = pd.read_csv(eval_log, names=["step", "metric", "value"], header=0)
+            df_acc = df[df["metric"] == "eval_accuracy"]
+            if df_acc.empty:
+                continue
+
+            final_acc = float(df_acc.iloc[-1]["value"])
+            melhor_acc = final_acc if (melhor_acc is None or final_acc > melhor_acc) else melhor_acc
+
+        if melhor_acc is None:
+            continue
+
+        chave = (tipo, dataset_num)
+        dados.setdefault(chave, {})
+        dados[chave][grupo] = melhor_acc
+
+    return dados
+
+
+def plotar_por_dataset(dados_dataset, dataset_num: int, output_dir: Path):
+    for tipo in ["CNN", "ViT"]:
+        chave = (tipo, dataset_num)
+        if chave not in dados_dataset:
+            continue
+
+        grupos = ["Transfer Learning", "Ajuste Fino", "Do Zero"]
+        valores = [dados_dataset[chave].get(g, 0.0) for g in grupos]
+
+        plt.figure(figsize=(6, 4))
+        plt.bar(grupos, valores)
+        plt.title(f"{tipo} - Dataset {dataset_num}")
+        plt.ylabel("Acurácia Final")
+        plt.ylim(0, 1.0)
+        plt.grid(axis="y", linestyle="--", linewidth=0.5)
+
+        for i, v in enumerate(valores):
+            plt.text(i, v + 0.01, f"{v:.3f}", ha="center", va="bottom", fontsize=9)
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        plt.savefig(output_dir / f"{tipo}_dataset{dataset_num}.png", bbox_inches="tight")
+        plt.close()
+
+
+def plotar_grupos_por_dataset(dados_dataset, dataset_num: int, output_dir: Path):
+    tipos = ["CNN", "ViT"]
+    estrategias = ["Transfer Learning", "Ajuste Fino", "Do Zero"]
+
+    # Matriz de valores: rows = tipos, cols = estrategias
+    valores = []
+    for tipo in tipos:
+        chave = (tipo, dataset_num)
+        linha = [dados_dataset.get(chave, {}).get(e, 0.0) for e in estrategias]
+        valores.append(linha)
+
+    valores = np.array(valores)  # shape: (2, 3)
+
+    x = np.arange(len(tipos))  # [0, 1]
+    width = 0.25  # largura de cada barra dentro do grupo
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    # Desenho das barras
+    for i, estrategia in enumerate(estrategias):
+        ax.bar(x + (i - 1) * width, valores[:, i], width, label=estrategia)
+
+    ax.set_title(f"Comparação de Estratégias — Dataset {dataset_num}", fontsize=14)
+    ax.set_ylabel("Acurácia Final")
+    ax.set_xticks(x)
+    ax.set_xticklabels(tipos, fontsize=12)
+    ax.set_ylim(0, 1.0)
+    ax.legend(title="Estratégias", fontsize=10)
+    ax.grid(axis="y", linestyle="--", linewidth=0.5)
+
+    # Rotular valores numéricos
+    for i in range(len(tipos)):
+        for j in range(len(estrategias)):
+            valor = valores[i, j]
+            if valor > 0:
+                ax.text(i + (j - 1) * width, valor + 0.01, f"{valor:.3f}",
+                        ha="center", va="bottom", fontsize=8)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(output_dir / f"Comparacao_Estrategias_dataset{dataset_num}.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def classificar_treinamento(spec):
+    if not spec["transfer"]:
+        return "Do Zero"
+    if spec["transfer"] and not spec["finetuning"]:
+        return "Transfer Learning"
+    if spec["finetuning"]:
+        return "Ajuste Fino"
+    return None
+
+
 if __name__ == "__main__":
     from treinamento import model_specs, dataset_nums, num_epochs, learning_rates
 
@@ -353,10 +473,16 @@ if __name__ == "__main__":
                     )
 
                 # 2) Comparar métricas finais entre modelos
-                comparar_metricas_finais(
+                dados = comparar_metricas_finais_por_dataset(
                     resultados_dir="./results",
-                    model_name=None,  # este parâmetro não é usado na nova versão
+                    model_specs=model_specs,
                     dataset_num=dataset_num
+                )
+
+                plotar_grupos_por_dataset(
+                    dados_dataset=dados,
+                    dataset_num=dataset_num,
+                    output_dir=Path("./plots")
                 )
 
                 # 3) Comparar tempo de treinamento entre modelos
