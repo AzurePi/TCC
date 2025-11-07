@@ -10,7 +10,7 @@ plots_dir.mkdir(exist_ok=True)
 Path("./plots/lr").mkdir(exist_ok=True)
 Path("./plots/agrupadas").mkdir(exist_ok=True)
 Path("./plots/latex").mkdir(exist_ok=True)
-#Path("./plots/loss").mkdir(exist_ok=True)
+# Path("./plots/loss").mkdir(exist_ok=True)
 
 # Estilo único para todo o módulo
 sns.set_theme(
@@ -23,8 +23,8 @@ METRIC_TRANSLATION = {
     "recall": "Recall",
     "precision": "Precisão",
     "f1": "F1-Score",
-    "accuracy": "Precisão",
-    "eval_accuracy": "Precisão",
+    "accuracy": "Acurácia",
+    "eval_accuracy": "Acurácia",
     "eval_f1": "F1-Score",
     "eval_precision": "Precisão",
     "eval_recall": "Recall"
@@ -216,7 +216,7 @@ def plotar_metricas_agrupadas_por_modelo(
         metric_name: str,
         lr: float,
         epochs: int,
-        datasets=(1, 2, 3),
+        datasets=(1, 2),
 ):
     df_sel = df_final[
         (df_final["lr"] == float(lr)) &
@@ -309,74 +309,113 @@ def plotar_metricas_agrupadas_por_modelo(
                         xy=(rect.get_x() + rect.get_width() / 2, h),
                         xytext=(0, 3),
                         textcoords="offset points",
-                        ha="center", va="bottom", fontsize=7)
+                        ha="center", va="bottom", fontsize=9)
     plt.ylim(0, 1.05)
     plt.tight_layout()
     plt.savefig(plots_dir / "agrupadas" / f"comparacao_{metric_name}-lr{lr}_e{epochs}.png", dpi=200)
     plt.close()
 
 
-def salvar_tabela_latex(df, metric_name: str, output_dir: Path = "./"):
+def format_lr_pow10(lr: float) -> str:
     """
-    df deve conter: arch, technique, epochs, lr, metric_value
-    Salva a tabela LaTeX em output_dir/tabela_{metric_name}.tex
+    Formata o learning rate como potência de 10 para LaTeX.
+    Ex: 0.001 -> '10^{-3}', 5e-4 -> '5×10^{-4}'
+    """
+    # Converte para notação científica
+    s = f"{lr:.1e}"  # ex: '5.0e-04'
+    mantissa, exp = s.split("e")
+    mantissa = float(mantissa)
+    exp = int(exp)
+
+    # Caso seja 1 × 10^n, omitimos o 1
+    if mantissa == 1:
+        return f"$10^{{{exp}}}$"
+
+    return f"${mantissa} \\times 10^{{{exp}}}$"
+
+
+def salvar_tabela_latex(df, metric_name: str, dataset: int, output_dir: Path = "./"):
+    """
+    Gera tabelas LaTeX separadas por modelo (arch) para um dataset e métrica.
+    df deve conter colunas: arch, tech, dataset, epochs, lr, metric_value, metric_name
     """
     df = df.copy()
+
+    # Filtra dataset e métrica
+    df = df[(df["dataset"] == dataset) & (df["metric_name"] == metric_name)]
+    if df.empty:
+        print(f"[AVISO] Sem dados para metric={metric_name}, dataset={dataset}. Pulando.")
+        return
+
+    # Formato de coluna (lr|epochs) com notação científica
     df = df.sort_values(by=["arch", "tech", "epochs", "lr"])
-
-    df["col_label"] = df.apply(lambda x: f"{x['lr']}/{x['epochs']}", axis=1)
-    tabela = df.pivot_table(index=["arch", "tech"], columns="col_label", values="metric_value")
-
-    best_by_row = tabela.max(axis=1)
-    best_by_col = tabela.max(axis=0)
-
-    tabela_fmt = tabela.copy().astype(object)
-    for (m, t), row in tabela.iterrows():
-        for col in tabela.columns:
-            val = row[col]
-            if pd.isna(val):
-                continue
-            s = f"{val:.4f}"
-            if val == best_by_row.loc[(m, t)]:
-                s = f"\\textbf{{{s}}}"
-            if val == best_by_col[col]:
-                s = f"\\textit{{{s}}}"
-            tabela_fmt.loc[(m, t), col] = s
-
-    linhas = []
-    last_model = None
-    for (model, technique), row in tabela_fmt.iterrows():
-        if model != last_model:
-            count = (tabela_fmt.index.get_level_values(0) == model).sum()
-            linhas.append(f"\\multirow{{{count}}}{{*}}{{{model}}} & {technique}")
-            last_model = model
-        else:
-            linhas.append(f" & {technique}")
-
-        linha_vals = " & ".join(str(row[c]) for c in tabela_fmt.columns)
-        linhas[-1] += " & " + linha_vals + " \\\\"
-
-    col_header = " & ".join(tabela_fmt.columns)
-
-    latex = (
-            f"\\begin{{table}}[htbp]\n"
-            f"\\centering\n"
-            f"\\caption{{Resultados da métrica {METRIC_TRANSLATION[metric_name]}}}\n"
-            f"\\label{{tab:{METRIC_TRANSLATION[metric_name]}}}\n"
-            f"\\begin{{tabularx}}{{X X {'X ' * len(tabela_fmt.columns)}}}\n"
-            f"\\hline\n"
-            f"Modelo & Técnica & {col_header} \\\\\n"
-            f"\\hline\n" +
-            "\n".join(linhas) +
-            "\n\\hline\n"
-            "\\end{tabularx}\n"
-            "\\small Fonte: Elaboração própria\n"
-            "\\end{table}\n"
+    df["col_label"] = df.apply(
+        lambda x: f"{format_lr_pow10(x['lr'])}\\textbar{x['epochs']}",
+        axis=1
     )
 
-    file_path = f"{output_dir}/tabela_{metric_name}.tex"
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(latex)
+    # --- Agora: separar por modelo (arch)
+    modelos = df["arch"].unique()
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for modelo in modelos:
+        df_m = df[df["arch"] == modelo]
+
+        # Constrói tabela técnica × lr|epochs
+        tabela = df_m.pivot_table(index="tech", columns="col_label", values="metric_value")
+
+        # Melhores valores linha/coluna
+        best_by_row = tabela.max(axis=1)
+        best_by_col = tabela.max(axis=0)
+
+        tabela_fmt = tabela.copy().astype(object)
+
+        for tech, row in tabela.iterrows():
+            for col in tabela.columns:
+                val = row[col]
+                if pd.isna(val):
+                    tabela_fmt.loc[tech, col] = "--"
+                    continue
+
+                s = f"{float(val):.3f}"
+
+                if val == best_by_row.loc[tech]:
+                    s = f"\\textbf{{{s}}}"
+                if val == best_by_col[col]:
+                    s = f"\\textit{{{s}}}"
+
+                tabela_fmt.loc[tech, col] = s
+
+        # Montagem das linhas
+        linhas = []
+        for tech, row in tabela_fmt.iterrows():
+            linha_vals = " & ".join(str(row[c]) for c in tabela_fmt.columns)
+            linhas.append(f"{tech} & " + linha_vals + " \\\\")
+
+        col_header = " & ".join(tabela_fmt.columns)
+
+        latex = (
+                f"\\begin{{table}}[htbp]\n"
+                f"\\centering\n"
+                f"\\caption{{Resultados da métrica {METRIC_TRANSLATION[metric_name]} no Dataset {dataset}, Modelo {modelo}}}\n"
+                f"\\label{{tab:{metric_name}_d{dataset}_{modelo}}}\n"
+                f"\\begin{{tabularx}}{{\\linewidth}}{{X {'X ' * len(tabela_fmt.columns)}}}\n"
+                f"\\hline\n"
+                f"Técnica & {col_header} \\\\\n"
+                f"\\hline\n" +
+                "\n".join(linhas) +
+                "\n\\hline\n"
+                "\\end{tabularx}\\\\n"
+                "\\vspace{0.3cm}\n"
+                "\\small Fonte: Elaboração própria\n"
+                "\\end{table}\n"
+        )
+
+        file_path = output_dir / f"tabela_{metric_name}_d{dataset}_{modelo}.tex"
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(latex)
 
 
 if __name__ == "__main__":
@@ -388,12 +427,6 @@ if __name__ == "__main__":
     ]
 
     for metric in metricas_interesse:
-        salvar_tabela_latex(
-            df=df,
-            metric_name=metric,
-            output_dir=plots_dir / "latex"
-        )
-
         # Seleciona apenas linhas dessa métrica
         df_metric = df[df["metric_name"] == metric]
         if df_metric.empty:
@@ -408,6 +441,13 @@ if __name__ == "__main__":
                     df=df_metric,
                     metric=metric,
                     epochs=epochs,
+                )
+
+                salvar_tabela_latex(
+                    df=df,
+                    metric_name=metric,
+                    output_dir=plots_dir / "latex",
+                    dataset=dataset,
                 )
 
             for lr in sorted(df_metric["lr"].unique()):
