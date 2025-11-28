@@ -114,7 +114,7 @@ if __name__ == "__main__":
 
                     trainer, csv_logger = get_trainer_and_logger(
                         model, dataset, spec, n_epochs - prev_epochs, learning_rate, processor, output_dir
-                    )
+                    ) # passamos n_epochs - prev_epochs para que o trainer use apenas as epochs restantes a partir do checkpoint
 
                     trainer.train()
                     trainer.evaluate()
